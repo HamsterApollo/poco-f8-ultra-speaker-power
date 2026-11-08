@@ -25,13 +25,12 @@ jobs:
           python3 - << 'PY'
           import subprocess
           NL = chr(10)
-          TQ = chr(39) * 3
           raw = ""
           revs = subprocess.check_output(["git", "rev-list", "HEAD"]).decode("utf-8").splitlines()
           for rev in revs:
               try:
                   txt = subprocess.check_output(["git", "show", f"{rev}:.github/workflows/build-apk.yml"]).decode("utf-8")
-                  if "N * 0.12" in txt and "Compile and Sign Android APK v3.0" in txt:
+                  if "N * 0.12" in txt and "Compile and Sign Android APK v3.0" in txt and "v5.0" not in txt:
                       raw = txt
                       break
               except Exception:
@@ -39,20 +38,7 @@ jobs:
           assert raw, "Base v3 commit not found"
           s = raw.split("python3 - << 'PY'" + NL, 1)[1].split(NL + "          PY", 1)[0]
           code = NL.join(l[10:] if l.startswith("          ") else l for l in s.splitlines())
-
-          fixed = []
-          in_dq = False
-          for l in code.splitlines():
-              if 'ui_inject = "' in l or 'new_calc = "' in l:
-                  l = l.replace(' = "', ' = ' + TQ)
-                  in_dq = True
-              elif in_dq and ('code = code.replace(' in l or 'p1, p2 = code.split(' in l):
-                  if fixed:
-                      last = fixed[-1]
-                      fixed[-1] = (last[:-1] + TQ) if last.endswith('"') else (last + TQ)
-                  in_dq = False
-              fixed.append(l)
-          code = NL.join(fixed)
+          code = code.replace('ui_inject = "', "ui_inject = '''").replace('new_calc = "', "new_calc = '''").replace('</div>"\n', "</div>'''\n").replace('}"\n', "}'''\n")
 
           a1, a2 = code.split("double mag = Math.sqrt(q1 * q1", 1)
           a3 = a2.split('if (b > 0) sb.append(",");', 1)[1]
