@@ -24,6 +24,7 @@ jobs:
         run: |
           python3 - << 'PY'
           import subprocess
+          NL = chr(10)
           raw = ""
           revs = subprocess.check_output(["git", "rev-list", "HEAD"]).decode("utf-8").splitlines()
           for rev in revs:
@@ -35,8 +36,8 @@ jobs:
               except Exception:
                   pass
           assert raw, "Base v3 commit not found"
-          s = raw.split("python3 - << 'PY'\n", 1)[1].split("\n" + " "*10 + "PY", 1)[0]
-          code = "\n".join(l[10:] if l.startswith(" "*10) else l for l in s.splitlines())
+          s = raw.split("python3 - << 'PY'" + NL, 1)[1].split(NL + "          PY", 1)[0]
+          code = NL.join(l[10:] if l.startswith("          ") else l for l in s.splitlines())
 
           a1, a2 = code.split("double mag = Math.sqrt(q1 * q1", 1)
           a3 = a2.split('if (b > 0) sb.append(",");', 1)[1]
@@ -124,12 +125,12 @@ jobs:
 
           p1, p2 = code.split("if (!t.playing || t.step === 0 || (t.lowRms < 0.0008", 1)
           p3 = p2.split("if (t.curMa > 0) {", 1)[1]
-          code = p1 + new_calc + "\n                  if (t.curMa > 0) {" + p3
+          code = p1 + new_calc + NL + "                  if (t.curMa > 0) {" + p3
 
-          code = code.replace(
-              "if (idleMa !== null) {",
-              "const dynBase = window._lastRawDyn || 220;\n                    if (spkMw > 38 && dynBase > 15) { calFactor = Math.max(0.25, Math.min(2.20, (spkMw - 38.0) / dynBase)); document.getElementById('calLabel').textContent = calFactor.toFixed(2) + 'x'; }\n                    if (idleMa !== null) {"
-          )
+          cal_patch = '''const dynBase = window._lastRawDyn || 220;
+                    if (spkMw > 38 && dynBase > 15) { calFactor = Math.max(0.25, Math.min(2.20, (spkMw - 38.0) / dynBase)); document.getElementById('calLabel').textContent = calFactor.toFixed(2) + 'x'; }
+                    if (idleMa !== null) {'''
+          code = code.replace("if (idleMa !== null) {", cal_patch)
           code = code.replace("v3.0", "v5.0").replace("v3", "v5")
           exec(code, {"__name__": "__main__"})
           PY
