@@ -39,6 +39,20 @@ jobs:
           s = raw.split("python3 - << 'PY'" + NL, 1)[1].split(NL + "          PY", 1)[0]
           code = NL.join(l[10:] if l.startswith("          ") else l for l in s.splitlines())
 
+          fixed = []
+          in_dq = False
+          for l in code.splitlines():
+              if 'ui_inject = "' in l or 'new_calc = "' in l:
+                  l = l.replace(' = "', " = '''")
+                  in_dq = True
+              elif in_dq and ('code = code.replace(' in l or 'p1, p2 = code.split(' in l):
+                  if fixed:
+                      last = fixed[-1]
+                      fixed[-1] = (last[:-1] + "'''") if last.endswith('"') else (last + "'''")
+                  in_dq = False
+              fixed.append(l)
+          code = NL.join(fixed)
+
           a1, a2 = code.split("double mag = Math.sqrt(q1 * q1", 1)
           a3 = a2.split('if (b > 0) sb.append(",");', 1)[1]
           code = a1 + 'double mag = Math.sqrt(q1*q1 + q2*q2 - q1*q2*coeff)/(N*0.0018); if (b<7) mag*=3.2; double norm = Math.max(0.06, Math.min(1.0, (20.0*Math.log10(Math.max(1e-5,mag))+68.0)/58.0)); if (b > 0) sb.append(",");' + a3
