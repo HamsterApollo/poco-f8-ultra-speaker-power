@@ -1,0 +1,294 @@
+name: Build POCO F8 Ultra Speaker Power APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate Android Project Files
+        run: |
+          mkdir -p app/src/main/java/com/poco/f8ultra/speakerpower
+          mkdir -p app/src/main/res/drawable
+          mkdir -p app/src/main/assets
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "PocoF8UltraSpeakerPower"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.poco.f8ultra.speakerpower"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.poco.f8ultra.speakerpower"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0.0-Bose21"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.poco.f8ultra.speakerpower">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <application
+                  android:allowBackup="true"
+                  android:hardwareAccelerated="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="POCO F8 Ultra 喇叭功耗儀"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/res/drawable/ic_launcher.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#0B0E14" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#FFD400" android:pathData="M54,18 C34.1,18 18,34.1 18,54 C18,73.9 34.1,90 54,90 C73.9,90 90,73.9 90,54 C90,34.1 73.9,18 54,18 Z" />
+              <path android:fillColor="#0B0E14" android:pathData="M54,32 C41.8,32 32,41.8 32,54 C32,66.2 41.8,76 54,76 C66.2,76 76,66.2 76,54 C76,41.8 66.2,32 54,32 Z" />
+              <path android:fillColor="#60A5FA" android:pathData="M54,42 C47.4,42 42,47.4 42,54 C42,60.6 47.4,66 54,66 C60.6,66 66,60.6 66,54 C66,47.4 60.6,42 54,42 Z" />
+          </vector>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/poco/f8ultra/speakerpower/MainActivity.kt
+          package com.poco.f8ultra.speakerpower
+
+          import android.annotation.SuppressLint
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.graphics.Color
+          import android.media.AudioManager
+          import android.os.BatteryManager
+          import android.os.Bundle
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebSettings
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import kotlin.math.abs
+
+          class MainActivity : Activity() {
+              private lateinit var webView: WebView
+              private lateinit var batteryManager: BatteryManager
+              private lateinit var audioManager: AudioManager
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = Color.parseColor("#0B0E14")
+                  window.navigationBarColor = Color.parseColor("#0B0E14")
+                  batteryManager = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+                  audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+                  webView = WebView(this).apply {
+                      setBackgroundColor(Color.parseColor("#0B0E14"))
+                      settings.javaScriptEnabled = true
+                      settings.domStorageEnabled = true
+                      settings.cacheMode = WebSettings.LOAD_DEFAULT
+                      webViewClient = WebViewClient()
+                      addJavascriptInterface(AndroidHardwareBridge(), "AndroidBridge")
+                  }
+                  setContentView(webView)
+                  webView.loadUrl("file:///android_asset/index.html")
+              }
+
+              inner class AndroidHardwareBridge {
+                  @JavascriptInterface
+                  fun getBatteryCurrentMa(): Double {
+                      val rawUa = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+                      val absVal = abs(rawUa).toDouble()
+                      return if (absVal > 10000.0) absVal / 1000.0 else absVal
+                  }
+                  @JavascriptInterface
+                  fun getBatteryVoltageMv(): Int {
+                      val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                      return intent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 3880) ?: 3880
+                  }
+                  @JavascriptInterface
+                  fun getMusicVolumePct(): Int {
+                      val cur = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                      val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                      return ((cur.toDouble() / max.toDouble()) * 100.0).toInt()
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/assets/index.html
+          <!DOCTYPE html>
+          <html lang="zh-Hant">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>POCO F8 Ultra 2.1 外放功耗監測儀</title>
+            <style>
+              body { background:#0B0E14; color:#F3F4F6; font-family:system-ui,sans-serif; margin:0; padding:16px; }
+              .card { background:#131822; border:1px solid #222B3B; border-radius:16px; padding:16px; margin-bottom:14px; }
+              .badge { background:#FFD400; color:#000; font-weight:800; padding:3px 8px; border-radius:99px; font-size:11px; }
+              .val { font-size:32px; font-weight:800; color:#FFD400; font-family:monospace; }
+              .sub { color:#60A5FA; font-weight:700; font-family:monospace; }
+              .stereo { color:#F59E0B; font-weight:700; font-family:monospace; }
+              button { background:#FFD400; color:#000; border:none; border-radius:10px; padding:10px 14px; font-weight:700; width:100%; margin-top:8px; }
+              input[type=range] { width:100%; accent-color:#FFD400; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <strong>POCO F8 Ultra 2.1 外放功耗儀</strong>
+                <span class="badge" id="modeBadge">Sound by Bose</span>
+              </div>
+              <p style="font-size:12px;color:#94A3B8;margin:6px 0 0;">雙 1115F 對稱揚聲器 + 1620 獨立重低音 + PMIC 差值實測</p>
+            </div>
+            <div class="card">
+              <div style="font-size:12px;color:#94A3B8;">2.1 聲學模型估算喇叭總功耗</div>
+              <div class="val"><span id="totalMw">485</span> mW</div>
+              <div style="display:flex;justify-content:space-between;margin-top:8px;font-size:13px;">
+                <span>1620 重低音: <span class="sub" id="subMw">245 mW</span></span>
+                <span>雙 1115F: <span class="stereo" id="stereoMw">240 mW</span></span>
+              </div>
+              <div style="margin-top:12px;font-size:12px;color:#CBD5E1;">
+                系統媒體音量: <strong id="volLabel">73%</strong>
+                <input id="volSlider" type="range" min="0" max="100" value="73">
+              </div>
+            </div>
+            <div class="card">
+              <div style="font-size:12px;color:#94A3B8;">PMIC 硬體電池直連差值實測 (BatteryManager)</div>
+              <div style="margin-top:6px;font-size:13px;">
+                即時電流: <strong id="curMa">--</strong> mA | 電壓: <strong id="voltMv">3880</strong> mV
+              </div>
+              <div style="margin-top:6px;font-size:13px;">
+                靜音基準電流: <strong id="baseMa">未鎖定</strong> | 實測喇叭淨功耗: <strong style="color:#FFD400;font-size:18px;" id="diffMw">-- mW</strong>
+              </div>
+              <button id="lockBtn">鎖定當前電流為 0% 靜音基準</button>
+            </div>
+            <script>
+              let baselineMa = null;
+              let lastCurrentMa = 310;
+              const slider = document.getElementById('volSlider');
+              document.getElementById('lockBtn').onclick = () => {
+                baselineMa = lastCurrentMa;
+                document.getElementById('baseMa').textContent = baselineMa.toFixed(1) + ' mA';
+              };
+              setInterval(() => {
+                let vol = parseInt(slider.value, 10) || 0;
+                let volt = 3880;
+                if (window.AndroidBridge) {
+                  try {
+                    vol = window.AndroidBridge.getMusicVolumePct();
+                    slider.value = vol;
+                    lastCurrentMa = window.AndroidBridge.getBatteryCurrentMa();
+                    volt = window.AndroidBridge.getBatteryVoltageMv();
+                    document.getElementById('modeBadge').textContent = 'PMIC 硬體直連';
+                  } catch (e) {}
+                }
+                document.getElementById('volLabel').textContent = vol + '%';
+                const vNorm = vol / 100.0;
+                const idle = vol > 0 ? 45 : 0;
+                const stereo = Math.round(idle * 0.6 + 460 * Math.pow(vNorm, 2.4));
+                const sub = Math.round(idle * 0.4 + 580 * Math.pow(vNorm, 2.55));
+                const total = stereo + sub;
+                document.getElementById('totalMw').textContent = total;
+                document.getElementById('subMw').textContent = sub + ' mW';
+                document.getElementById('stereoMw').textContent = stereo + ' mW';
+                document.getElementById('curMa').textContent = lastCurrentMa.toFixed(1);
+                document.getElementById('voltMv').textContent = volt;
+                if (baselineMa !== null) {
+                  const diff = Math.max(0, lastCurrentMa - baselineMa) * (volt / 1000.0);
+                  document.getElementById('diffMw').textContent = Math.round(diff) + ' mW';
+                }
+              }, 400);
+            </script>
+          </body>
+          </html>
+          EOF
+
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload Compiled APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PocoF8Ultra-SpeakerPower-APK
+          path: app/build/outputs/apk/debug/*.apk
