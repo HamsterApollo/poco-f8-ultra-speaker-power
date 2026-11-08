@@ -25,6 +25,7 @@ jobs:
           python3 - << 'PY'
           import subprocess
           NL = chr(10)
+          TQ = chr(39) * 3
           raw = ""
           revs = subprocess.check_output(["git", "rev-list", "HEAD"]).decode("utf-8").splitlines()
           for rev in revs:
@@ -43,12 +44,12 @@ jobs:
           in_dq = False
           for l in code.splitlines():
               if 'ui_inject = "' in l or 'new_calc = "' in l:
-                  l = l.replace(' = "', " = '''")
+                  l = l.replace(' = "', ' = ' + TQ)
                   in_dq = True
               elif in_dq and ('code = code.replace(' in l or 'p1, p2 = code.split(' in l):
                   if fixed:
                       last = fixed[-1]
-                      fixed[-1] = (last[:-1] + "'''") if last.endswith('"') else (last + "'''")
+                      fixed[-1] = (last[:-1] + TQ) if last.endswith('"') else (last + TQ)
                   in_dq = False
               fixed.append(l)
           code = NL.join(fixed)
