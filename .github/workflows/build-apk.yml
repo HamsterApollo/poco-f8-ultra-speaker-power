@@ -221,9 +221,10 @@ jobs:
                                               q2 = q1;
                                               q1 = q0;
                                           }
-                                          double mag = Math.sqrt(q1 * q1 + q2 * q2 - q1 * q2 * coeff) / (N * 0.12);
-                                          double norm = Math.min(1.0, Math.pow(Math.max(0.0, mag), 0.55));
-                                          if (b > 0) sb.append(",");
+                                          double mag = Math.sqrt(q1 * q1 + q2 * q2 - q1 * q2 * coeff) / (N * 0.006);
+                                          if (b < 7) mag *= 2.8;
+                                          double norm = Math.max(0.05, Math.min(1.0, (20.0 * Math.log10(Math.max(1e-5, mag)) + 52.0) / 48.0));
+                                                                    if (b > 0) sb.append(",");                
                                           sb.append(String.format(Locale.US, "%.2f", norm));
                                       }
                                       sb.append("]");
@@ -538,6 +539,10 @@ jobs:
                     const spkMw = Math.round(deltaSpkMa * (volt / 1000.0));
                     document.getElementById('spkPowerTxt').textContent =
                       spkMw + ' mW (ΔI=' + (deltaSpkMa >= 0 ? '+' : '') + deltaSpkMa.toFixed(1) + 'mA)';
+const curDispMw = parseFloat(document.getElementById('totalMw').textContent) || 200;
+if (spkMw > 25 && curDispMw > 20) {
+calFactor = Math.max(0.15, Math.min(3.0, (spkMw / (curDispMw / calFactor))));
+document.getElementById('calLabel').textContent = calFactor.toFixed(2) + 'x';
 
                     if (idleMa !== null) {
                       const deltaEqMa = eqMuteMa - idleMa;
@@ -675,7 +680,7 @@ jobs:
               "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
               "-dname", "CN=Android Debug,O=Android,C=US"
           ])
-          out_apk = "dist/PocoF8Ultra-SpeakerPower-v3.apk"
+          out_apk = "dist/PocoF8Ultra-SpeakerPower-4.ap"
           subprocess.check_call([
               apksigner, "sign",
               "--ks", "debug.keystore",
