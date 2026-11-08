@@ -18,7 +18,7 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Compile and Sign Android APK v2.0
+      - name: Compile and Sign Android APK v3.0
         run: |
           python3 - << 'PY'
           import glob, os, subprocess, zipfile
@@ -43,8 +43,8 @@ jobs:
               f.write('''<?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="com.poco.f8ultra.speakerpower"
-              android:versionCode="2"
-              android:versionName="2.0.0">
+              android:versionCode="3"
+              android:versionName="3.0.0">
               <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -52,7 +52,7 @@ jobs:
               <application
                   android:allowBackup="true"
                   android:hardwareAccelerated="true"
-                  android:label="POCO F8 Ultra 喇叭功耗儀"
+                  android:label="POCO F8 Ultra 喇叭功耗儀 v3"
                   android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
                   <activity
                       android:name=".MainActivity"
@@ -69,7 +69,7 @@ jobs:
           with open("res/values/strings.xml", "w", encoding="utf-8") as f:
               f.write('''<?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <string name="app_name">POCO F8 Ultra 喇叭功耗儀</string>
+              <string name="app_name">POCO F8 Ultra 喇叭功耗儀 v3</string>
           </resources>'''.strip())
 
           with open("src/com/poco/f8ultra/speakerpower/MainActivity.java", "w", encoding="utf-8") as f:
@@ -81,8 +81,10 @@ jobs:
           import android.content.IntentFilter;
           import android.content.pm.PackageManager;
           import android.graphics.Color;
+          import android.media.AudioFormat;
           import android.media.AudioManager;
-          import android.media.audiofx.Visualizer;
+          import android.media.AudioRecord;
+          import android.media.MediaRecorder;
           import android.os.BatteryManager;
           import android.os.Build;
           import android.os.Bundle;
@@ -90,15 +92,21 @@ jobs:
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
+          import java.util.Locale;
 
           public class MainActivity extends Activity {
               private WebView webView;
               private BatteryManager batteryManager;
               private AudioManager audioManager;
-              private Visualizer visualizer;
-              private byte[] fftBytes;
-              private byte[] waveBytes;
-              private boolean visualizerActive = false;
+
+              private volatile boolean micRunning = false;
+              private Thread micThread;
+              private volatile double latestLowRms = 0.0;
+              private volatile double latestMidRms = 0.0;
+              private volatile double latestTotalDb = -90.0;
+              private volatile String latestBinsJson = "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]";
+              private volatile boolean hasAudioPerm = false;
+              private volatile String micSourceName = "UNINIT";
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
@@ -112,10 +120,12 @@ jobs:
                       if (checkSelfPermission("android.permission.RECORD_AUDIO") != PackageManager.PERMISSION_GRANTED) {
                           requestPermissions(new String[]{"android.permission.RECORD_AUDIO"}, 101);
                       } else {
-                          initVisualizer();
+                          hasAudioPerm = true;
+                          startRawAcousticSensor();
                       }
                   } else {
-                      initVisualizer();
+                      hasAudioPerm = true;
+                      startRawAcousticSensor();
                   }
 
                   webView = new WebView(this);
@@ -134,54 +144,132 @@ jobs:
               public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
                   super.onRequestPermissionsResult(requestCode, permissions, grantResults);
                   if (requestCode == 101 && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                      initVisualizer();
+                      hasAudioPerm = true;
+                      startRawAcousticSensor();
                   }
               }
 
-              private synchronized void initVisualizer() {
-                  if (visualizerActive && visualizer != null) return;
-                  try {
-                      if (visualizer != null) {
-                          visualizer.release();
-                          visualizer = null;
+              private synchronized void startRawAcousticSensor() {
+                  if (micRunning) return;
+                  micRunning = true;
+                  micThread = new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          int sampleRate = 48000;
+                          int minBuf = AudioRecord.getMinBufferSize(
+                              sampleRate,
+                              AudioFormat.CHANNEL_IN_MONO,
+                              AudioFormat.ENCODING_PCM_16BIT
+                          );
+                          int bufSize = Math.max(minBuf, 4096);
+                          AudioRecord rec = null;
+                          try {
+                              int src = Build.VERSION.SDK_INT >= 24
+                                  ? MediaRecorder.AudioSource.UNPROCESSED
+                                  : MediaRecorder.AudioSource.VOICE_RECOGNITION;
+                              rec = new AudioRecord(src, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
+                              if (rec.getState() == AudioRecord.STATE_INITIALIZED) {
+                                  micSourceName = "UNPROCESSED_48KHZ";
+                              } else {
+                                  rec.release();
+                                  rec = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
+                                  micSourceName = "VOICE_REC_48KHZ";
+                              }
+                              if (rec.getState() != AudioRecord.STATE_INITIALIZED) {
+                                  micRunning = false;
+                                  micSourceName = "INIT_FAILED";
+                                  return;
+                              }
+                              rec.startRecording();
+                              short[] pcm = new short[1024];
+                              double alpha = 0.0284; // 220 Hz crossover @ 48kHz
+                              double lp1 = 0.0;
+                              double lp2 = 0.0;
+
+                              while (micRunning) {
+                                  int read = rec.read(pcm, 0, 1024);
+                                  if (read > 0) {
+                                      double lowSq = 0.0;
+                                      double midSq = 0.0;
+                                      double totSq = 0.0;
+                                      for (int i = 0; i < read; i++) {
+                                          double x = pcm[i] / 32768.0;
+                                          lp1 += alpha * (x - lp1);
+                                          lp2 += alpha * (lp1 - lp2);
+                                          double lowSample = lp2;
+                                          double midSample = x - lowSample;
+                                          lowSq += lowSample * lowSample;
+                                          midSq += midSample * midSample;
+                                          totSq += x * x;
+                                      }
+                                      double lRms = Math.sqrt(lowSq / read);
+                                      double mRms = Math.sqrt(midSq / read);
+                                      double tRms = Math.sqrt(totSq / read);
+                                      latestLowRms = lRms;
+                                      latestMidRms = mRms;
+                                      latestTotalDb = tRms > 1e-6 ? (20.0 * Math.log10(tRms)) : -90.0;
+
+                                      int N = Math.min(read, 256);
+                                      StringBuilder sb = new StringBuilder("[");
+                                      for (int b = 0; b < 24; b++) {
+                                          double freq = 50.0 * Math.pow(1.24, b);
+                                          double omega = 2.0 * Math.PI * freq / sampleRate;
+                                          double coeff = 2.0 * Math.cos(omega);
+                                          double q0 = 0, q1 = 0, q2 = 0;
+                                          for (int i = 0; i < N; i++) {
+                                              q0 = coeff * q1 - q2 + (pcm[i] / 32768.0);
+                                              q2 = q1;
+                                              q1 = q0;
+                                          }
+                                          double mag = Math.sqrt(q1 * q1 + q2 * q2 - q1 * q2 * coeff) / (N * 0.12);
+                                          double norm = Math.min(1.0, Math.pow(Math.max(0.0, mag), 0.55));
+                                          if (b > 0) sb.append(",");
+                                          sb.append(String.format(Locale.US, "%.2f", norm));
+                                      }
+                                      sb.append("]");
+                                      latestBinsJson = sb.toString();
+                                  }
+                              }
+                          } catch (Exception e) {
+                              micRunning = false;
+                              micSourceName = "ERR:" + e.getMessage();
+                          } finally {
+                              if (rec != null) {
+                                  try { rec.stop(); } catch (Exception e) {}
+                                  try { rec.release(); } catch (Exception e) {}
+                              }
+                          }
                       }
-                      visualizer = new Visualizer(0);
-                      int[] range = Visualizer.getCaptureSizeRange();
-                      int size = range != null && range.length > 1 ? Math.min(512, range[1]) : 256;
-                      visualizer.setCaptureSize(size);
-                      fftBytes = new byte[size];
-                      waveBytes = new byte[size];
-                      visualizer.setEnabled(true);
-                      visualizerActive = true;
-                  } catch (Exception e) {
-                      visualizerActive = false;
-                  }
+                  });
+                  micThread.setDaemon(true);
+                  micThread.start();
               }
 
               @Override
               protected void onDestroy() {
-                  if (visualizer != null) {
-                      try {
-                          visualizer.setEnabled(false);
-                          visualizer.release();
-                      } catch (Exception e) {}
-                  }
+                  micRunning = false;
                   super.onDestroy();
               }
 
               public class AndroidHardwareBridge {
                   @JavascriptInterface
+                  public int getRawCurrentUa() {
+                      return batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
+                  }
+
+                  @JavascriptInterface
                   public double getBatteryCurrentMa() {
-                      int rawUa = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
-                      double absVal = Math.abs((double) rawUa);
+                      int raw = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
+                      double absVal = Math.abs((double) raw);
                       return absVal > 10000.0 ? absVal / 1000.0 : absVal;
                   }
 
                   @JavascriptInterface
-                  public double getBatteryAvgCurrentMa() {
-                      int rawUa = batteryManager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_AVERAGE);
-                      double absVal = Math.abs((double) rawUa);
-                      return absVal > 10000.0 ? absVal / 1000.0 : absVal;
+                  public boolean isCharging() {
+                      Intent intent = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+                      if (intent == null) return false;
+                      int status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+                      return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL;
                   }
 
                   @JavascriptInterface
@@ -215,68 +303,22 @@ jobs:
                   }
 
                   @JavascriptInterface
-                  public boolean isMusicActive() {
-                      return audioManager.isMusicActive();
-                  }
-
-                  @JavascriptInterface
-                  public String getAudioSpectrumJson() {
-                      if (!visualizerActive) {
-                          initVisualizer();
+                  public String getRealTelemetryJson() {
+                      if (hasAudioPerm && !micRunning) {
+                          startRawAcousticSensor();
                       }
                       boolean playing = audioManager.isMusicActive();
-                      if (!playing) {
-                          return "{\\"playing\\":false,\\"vis\\":false,\\"low\\":0,\\"mid\\":0,\\"rms\\":0,\\"bins\\":[]}";
-                      }
-                      if (visualizerActive && visualizer != null) {
-                          try {
-                              if (!visualizer.getEnabled()) visualizer.setEnabled(true);
-                              int s1 = visualizer.getFft(fftBytes);
-                              int s2 = visualizer.getWaveForm(waveBytes);
-                              if (s1 == Visualizer.SUCCESS && fftBytes != null) {
-                                  int n = fftBytes.length / 2;
-                                  double lowSum = 0;
-                                  int lowCnt = 0;
-                                  double midSum = 0;
-                                  int midCnt = 0;
-                                  StringBuilder bins = new StringBuilder("[");
-                                  int numBars = 24;
-                                  for (int b = 0; b < numBars; b++) {
-                                      int idx = 1 + (b * Math.min(n - 2, 64)) / numBars;
-                                      int re = fftBytes[2 * idx];
-                                      int im = fftBytes[2 * idx + 1];
-                                      double mag = Math.min(1.0, Math.sqrt(re * re + im * im) / 95.0);
-                                      if (b > 0) bins.append(",");
-                                      bins.append(String.format(java.util.Locale.US, "%.2f", mag));
-                                      if (b < 6) {
-                                          lowSum += mag;
-                                          lowCnt++;
-                                      } else {
-                                          midSum += mag;
-                                          midCnt++;
-                                      }
-                                  }
-                                  bins.append("]");
-                                  double rms = 0;
-                                  if (s2 == Visualizer.SUCCESS && waveBytes != null) {
-                                      double sq = 0;
-                                      for (int i = 0; i < waveBytes.length; i++) {
-                                          int u = (waveBytes[i] & 0xFF) - 128;
-                                          sq += (u / 128.0) * (u / 128.0);
-                                      }
-                                      rms = Math.sqrt(sq / waveBytes.length);
-                                  }
-                                  double lowAvg = lowCnt > 0 ? lowSum / lowCnt : 0;
-                                  double midAvg = midCnt > 0 ? midSum / midCnt : 0;
-                                  return String.format(
-                                      java.util.Locale.US,
-                                      "{\\"playing\\":true,\\"vis\\":true,\\"low\\":%.3f,\\"mid\\":%.3f,\\"rms\\":%.3f,\\"bins\\":%s}",
-                                      lowAvg, midAvg, rms, bins.toString()
-                                  );
-                              }
-                          } catch (Exception e) {}
-                      }
-                      return "{\\"playing\\":true,\\"vis\\":false,\\"low\\":-1,\\"mid\\":-1,\\"rms\\":-1,\\"bins\\":[]}";
+                      boolean chg = isCharging();
+                      int rawUa = getRawCurrentUa();
+                      double curMa = getBatteryCurrentMa();
+                      int voltMv = getBatteryVoltageMv();
+                      int step = getMusicVolumeStep();
+                      int maxStep = getMusicMaxStep();
+                      return String.format(
+                          Locale.US,
+                          "{\\"playing\\":%b,\\"mic\\":%b,\\"src\\":\\"%s\\",\\"chg\\":%b,\\"rawUa\\":%d,\\"curMa\\":%.1f,\\"voltMv\\":%d,\\"step\\":%d,\\"maxStep\\":%d,\\"lowRms\\":%.5f,\\"midRms\\":%.5f,\\"db\\":%.1f,\\"bins\\":%s}",
+                          playing, micRunning, micSourceName, chg, rawUa, curMa, voltMv, step, maxStep, latestLowRms, latestMidRms, latestTotalDb, latestBinsJson
+                      );
                   }
               }
           }'''.strip())
@@ -287,151 +329,137 @@ jobs:
           <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-            <title>POCO F8 Ultra 2.1 真實外放功耗儀 v2.0</title>
+            <title>POCO F8 Ultra 2.1 真實外放功耗儀 v3.0</title>
             <style>
               * { box-sizing: border-box; }
-              body { background:#0B0E14; color:#F3F4F6; font-family:system-ui,-apple-system,sans-serif; margin:0; padding:12px; }
-              .card { background:#131822; border:1px solid #222B3B; border-radius:16px; padding:14px; margin-bottom:12px; }
-              .row-between { display:flex; justify-content:space-between; align-items:center; gap:8px; }
-              .badge { background:#FFD400; color:#000; font-weight:800; padding:3px 9px; border-radius:99px; font-size:11px; white-space:nowrap; }
-              .badge-green { background:rgba(16,185,129,0.2); color:#34D399; border:1px solid rgba(16,185,129,0.4); font-weight:700; padding:2px 8px; border-radius:99px; font-size:11px; }
-              .badge-warn { background:rgba(245,158,11,0.2); color:#FBBF24; border:1px solid rgba(245,158,11,0.4); font-weight:700; padding:2px 8px; border-radius:99px; font-size:11px; }
-              .val-giant { font-size:36px; font-weight:900; color:#FFD400; font-family:monospace; line-height:1.1; }
-              .grid-3 { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-top:10px; }
-              .unit-box { background:#0D1119; border:1px solid #1E293B; border-radius:12px; padding:8px 4px; text-align:center; }
-              .unit-title { font-size:11px; color:#94A3B8; margin-bottom:3px; }
-              .unit-val { font-size:15px; font-weight:800; font-family:monospace; }
+              body { background:#0B0E14; color:#F3F4F6; font-family:system-ui,-apple-system,sans-serif; margin:0; padding:10px; }
+              .card { background:#131822; border:1px solid #222B3B; border-radius:15px; padding:12px; margin-bottom:10px; }
+              .row-between { display:flex; justify-content:space-between; align-items:center; gap:6px; }
+              .badge { background:#FFD400; color:#000; font-weight:800; padding:2px 8px; border-radius:99px; font-size:10px; white-space:nowrap; }
+              .badge-green { background:rgba(16,185,129,0.2); color:#34D399; border:1px solid rgba(16,185,129,0.4); font-weight:700; padding:2px 8px; border-radius:99px; font-size:10px; }
+              .badge-red { background:rgba(239,68,68,0.25); color:#FCA5A5; border:1px solid rgba(239,68,68,0.5); font-weight:700; padding:4px 8px; border-radius:8px; font-size:11px; margin-bottom:8px; display:none; }
+              .val-giant { font-size:32px; font-weight:900; color:#FFD400; font-family:monospace; line-height:1.1; }
+              .grid-3 { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; margin-top:8px; }
+              .unit-box { background:#0D1119; border:1px solid #1E293B; border-radius:10px; padding:7px 4px; text-align:center; }
+              .unit-title { font-size:10px; color:#94A3B8; margin-bottom:2px; }
+              .unit-val { font-size:14px; font-weight:800; font-family:monospace; }
               .sub-c { color:#60A5FA; }
               .top-c { color:#FBBF24; }
               .bot-c { color:#FB923C; }
-              canvas { width:100%; height:64px; background:#080B10; border-radius:10px; border:1px solid #1E2636; display:block; margin-top:10px; }
-              button { background:#FFD400; color:#000; border:none; border-radius:12px; padding:12px; font-weight:800; width:100%; margin-top:10px; font-size:13px; cursor:pointer; }
-              button.secondary { background:#1E293B; color:#E2E8F0; border:1px solid #334155; margin-top:8px; font-weight:600; }
-              select { width:100%; background:#0D1119; color:#fff; border:1px solid #222B3B; border-radius:10px; padding:8px; margin-top:6px; font-size:12px; }
-              .stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px; }
-              .stat-item { background:#0D1119; border:1px solid #1E293B; border-radius:10px; padding:8px 10px; font-size:12px; }
-              .stat-label { color:#94A3B8; font-size:11px; }
-              .stat-num { font-family:monospace; font-size:14px; font-weight:700; color:#F8FAFC; margin-top:2px; }
-              .progress-wrap { width:100%; height:8px; background:#0D1119; border-radius:99px; overflow:hidden; margin-top:8px; display:none; }
-              .progress-bar { height:100%; background:#FFD400; width:0%; transition:width 0.2s; }
+              canvas { width:100%; height:56px; background:#080B10; border-radius:8px; border:1px solid #1E2636; display:block; margin-top:8px; }
+              button { background:#FFD400; color:#000; border:none; border-radius:10px; padding:11px; font-weight:800; width:100%; margin-top:8px; font-size:12px; cursor:pointer; }
+              button.btn-blue { background:#3B82F6; color:#fff; }
+              button.secondary { background:#1E293B; color:#E2E8F0; border:1px solid #334155; margin-top:6px; font-weight:600; padding:8px; }
+              .stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px; }
+              .stat-item { background:#0D1119; border:1px solid #1E293B; border-radius:9px; padding:7px 8px; font-size:11px; }
+              .stat-label { color:#94A3B8; font-size:10px; }
+              .stat-num { font-family:monospace; font-size:13px; font-weight:700; color:#F8FAFC; margin-top:2px; }
+              .raw-box { background:#070A0E; border:1px solid #1E293B; border-radius:8px; padding:7px; font-family:monospace; font-size:10px; color:#94A3B8; margin-top:8px; line-height:1.4; }
             </style>
           </head>
           <body>
-            <div class="card">
-              <div class="row-between">
-                <strong style="font-size:15px;">POCO F8 Ultra 2.1 外放真實功耗儀 v2.0</strong>
-                <span class="badge" id="modeBadge">DSP + PMIC 雙引擎</span>
-              </div>
-              <p style="font-size:11px;color:#94A3B8;margin:5px 0 0;">
-                直連 Android 全域音訊輸出混音器 (Visualizer Session 0) + 無UI免觸控自動電流差值校準
-              </p>
+            <div id="chgWarnBanner" class="badge-red">
+              ⚠️ 偵測到手機正在充電！充電電流會覆蓋電池放電數據，請拔除充電線以量測真實功耗。
             </div>
 
             <div class="card">
               <div class="row-between">
-                <span style="font-size:12px;color:#94A3B8;">即時動態外放喇叭總功耗 (隨音樂頻譜跳動)</span>
-                <span class="badge-green" id="playStatusBadge">偵測音訊中</span>
+                <strong style="font-size:14px;">POCO F8 Ultra 真實外放功耗儀 v3.0</strong>
+                <span class="badge" id="micSrcBadge">48kHz 原音直採</span>
               </div>
-              <div class="row-between" style="margin-top:6px;align-items:baseline;">
-                <div class="val-giant"><span id="totalMw">0</span> <span style="font-size:16px;font-weight:700;">mW</span></div>
-                <div style="text-align:right;font-size:11px;color:#94A3B8;font-family:monospace;">
-                  峰值: <strong id="peakMw" style="color:#E2E8F0;">0 mW</strong> | 平均: <strong id="avgMw" style="color:#E2E8F0;">0 mW</strong>
+              <p style="font-size:10px;color:#94A3B8;margin:4px 0 0;">
+                專為 Poweramp EQ (全域等化 / AIDL 模式 1 / 16384 區塊) 打造：零假動畫，100% 讀取真實麥克風聲壓與 PMIC 原始電流
+              </p>
+            </div>
+
+            <!-- Card 1: Real 48kHz UNPROCESSED Acoustic Crossover Meter -->
+            <div class="card">
+              <div class="row-between">
+                <span style="font-size:11px;color:#94A3B8;">真實物理聲波推算喇叭功耗 (含 Poweramp EQ 增益)</span>
+                <span class="badge-green" id="dbBadge">-90.0 dBFS</span>
+              </div>
+              <div class="row-between" style="margin-top:5px;align-items:baseline;">
+                <div class="val-giant"><span id="totalMw">0</span> <span style="font-size:14px;">mW</span></div>
+                <div style="text-align:right;font-size:10px;color:#94A3B8;font-family:monospace;">
+                  系統音量: <strong id="volLabel" style="color:#FFD400;">--%</strong> | 校準: <strong id="calLabel" style="color:#34D399;">1.00x</strong>
                 </div>
               </div>
 
               <div class="grid-3">
                 <div class="unit-box">
-                  <div class="unit-title">頂部 1115F</div>
+                  <div class="unit-title">頂部 1115F (>220Hz)</div>
                   <div class="unit-val top-c" id="topMw">0 mW</div>
                 </div>
                 <div class="unit-box" style="border-color:rgba(96,165,250,0.4);">
-                  <div class="unit-title">1620 重低音</div>
+                  <div class="unit-title">1620 重低音 (≤220Hz)</div>
                   <div class="unit-val sub-c" id="subMw">0 mW</div>
                 </div>
                 <div class="unit-box">
-                  <div class="unit-title">底部 1115F</div>
+                  <div class="unit-title">底部 1115F (>220Hz)</div>
                   <div class="unit-val bot-c" id="botMw">0 mW</div>
                 </div>
               </div>
 
-              <canvas id="fftCanvas" width="320" height="64"></canvas>
-
-              <div class="row-between" style="margin-top:8px;font-size:12px;color:#CBD5E1;">
-                <span>系統音量: <strong id="volLabel" style="color:#FFD400;font-family:monospace;">--% (--/15格)</strong></span>
-                <span>PMIC 實測校準: <strong id="calFactorLabel" style="color:#34D399;font-family:monospace;">1.00x</strong></span>
+              <canvas id="fftCanvas" width="320" height="56"></canvas>
+              <div class="row-between" style="font-size:10px;color:#64748B;margin-top:4px;font-family:monospace;">
+                <span>低頻 RMS (≤220Hz): <strong id="lowRmsTxt" style="color:#60A5FA;">0.0000</strong></span>
+                <span>中高頻 RMS (>220Hz): <strong id="midRmsTxt" style="color:#FBBF24;">0.0000</strong></span>
               </div>
-
-              <select id="profileSel">
-                <option value="bose_dyn">Bose Dynamic (預設重低音強化)</option>
-                <option value="bose_bal">Bose Balanced (均衡原音)</option>
-                <option value="stereo_only">關閉 1620 重低音 (僅雙 1115F)</option>
-              </select>
             </div>
 
+            <!-- Card 2: Transparent 3-Stage PMIC Hardware Power Profiler -->
             <div class="card">
               <div class="row-between">
-                <span style="font-size:12px;color:#94A3B8;">PMIC 免觸控無UI自動靜音↔外放差值實測</span>
-                <span class="badge-warn" id="pmicFilterBadge">CPU 突波濾波開啟</span>
+                <span style="font-size:11px;color:#94A3B8;">PMIC 電池電流三態真實拆解 (完全透明無黑箱)</span>
+                <span class="badge" id="pmicRateBadge">即時原始數據</span>
               </div>
-              <p style="font-size:11px;color:#94A3B8;margin:4px 0 8px;line-height:1.4;">
-                為什麼之前會跳出 4306 mW？因為按實體音量鍵或觸控螢幕會喚醒 Snapdragon 8 Elite Gen 5 與 120Hz 系統音量條動畫（瞬間暴衝 +1100 mA CPU/GPU 電流）！<br>
-                <strong>解法</strong>：點擊下方黃色按鈕後<strong>手完全離開螢幕 8 秒</strong>，程式會在背景直接控制硬體功放靜音 3.5 秒再復原 3.5 秒（<strong>完全不跳出系統音量條 UI、不觸發 CPU 升頻</strong>），精準分離出純喇叭功耗！
-              </p>
 
               <div class="stat-grid">
                 <div class="stat-item">
-                  <div class="stat-label">PMIC 整機電流 / 電壓</div>
-                  <div class="stat-num"><span id="curMa">--</span> mA <span style="font-size:11px;color:#64748B;">(@<span id="voltMv">3880</span>mV)</span></div>
+                  <div class="stat-label">① 音樂暫停基準 (I_idle)</div>
+                  <div class="stat-num" id="idleMaTxt" style="color:#94A3B8;">未紀錄</div>
                 </div>
                 <div class="stat-item">
-                  <div class="stat-label">已攔截 CPU/螢幕突波</div>
-                  <div class="stat-num" id="cpuSpikeMa" style="color:#F87171;">0 mA</div>
+                  <div class="stat-label">② 播放+EQ但0%靜音 (I_eq)</div>
+                  <div class="stat-num" id="eqMuteMaTxt" style="color:#60A5FA;">未紀錄</div>
                 </div>
-                <div class="stat-item">
-                  <div class="stat-label">0% 無UI靜音穩態基準</div>
-                  <div class="stat-num" id="baseMa" style="color:#93C5FD;">未校準 (點下方按鈕)</div>
+                <div class="stat-item" style="border-color:rgba(96,165,250,0.35);">
+                  <div class="stat-label">Poweramp EQ + 播放 CPU 功耗</div>
+                  <div class="stat-num" id="eqPowerTxt" style="color:#60A5FA;">-- mW</div>
                 </div>
-                <div class="stat-item" style="border-color:rgba(255,212,0,0.4);">
-                  <div class="stat-label">濾波後純喇叭實測淨功耗</div>
-                  <div class="stat-num" id="diffMw" style="color:#FFD400;font-size:16px;">-- mW</div>
+                <div class="stat-item" style="border-color:rgba(255,212,0,0.45);">
+                  <div class="stat-label">③ 純喇叭功放真實淨功耗</div>
+                  <div class="stat-num" id="spkPowerTxt" style="color:#FFD400;font-size:15px;">-- mW</div>
                 </div>
               </div>
 
-              <div class="progress-wrap" id="autoProgressWrap">
-                <div class="progress-bar" id="autoProgressBar"></div>
+              <div class="raw-box" id="rawDebugBox">
+                PMIC Raw: -- uA (-- mA) | 電壓: -- mV | 10秒中位數: -- mA<br>
+                最近8次原始採樣(mA): [--]
               </div>
-              <div id="autoStatusText" style="font-size:12px;color:#FFD400;margin-top:6px;text-align:center;font-weight:700;display:none;"></div>
 
-              <button id="btnAutoMeasure">⚡ 啟動 8 秒免觸控全自動靜音↔外放實測</button>
-              <button id="btnManualLock" class="secondary">手動鎖定當前穩態電流為 0% 基準</button>
+              <div id="autoStatusText" style="font-size:11px;color:#FFD400;margin-top:6px;text-align:center;font-weight:700;display:none;"></div>
+
+              <button id="btnAutoSpeaker">⚡ 1. 一鍵無UI實測「純喇叭功放功耗」(自動 0%↔當前音量)</button>
+              <button id="btnRecordIdle" class="secondary">⏸ 2. 在「音樂暫停」時點此紀錄 I_idle (用來算 Poweramp EQ 耗電)</button>
             </div>
 
             <script>
-              let baselineMa = null;
+              let idleMa = null;
+              let eqMuteMa = null;
+              let activePlayMa = null;
               let calFactor = 1.0;
-              let peakMw = 0;
-              let sumMw = 0;
-              let cntMw = 0;
-              let touchCooldownUntil = 0;
-              let steadyHistory = [];
-              let lastFilteredDeltaMa = 0;
-              let autoTesting = false;
-              let bins = new Array(24).fill(0.05);
+              let rawHistory = [];
+              let autoRunning = false;
 
-              window.addEventListener('touchstart', () => {
-                if (!autoTesting) touchCooldownUntil = Date.now() + 2200;
-              }, { passive: true });
-
-              function trimmedMean(arr) {
+              function median(arr) {
                 if (!arr.length) return 0;
-                const sorted = arr.slice().sort((a, b) => a - b);
-                const take = Math.max(1, Math.ceil(sorted.length * 0.6));
-                let s = 0;
-                for (let i = 0; i < take; i++) s += sorted[i];
-                return s / take;
+                const s = arr.slice().sort((a, b) => a - b);
+                const mid = Math.floor(s.length / 2);
+                return s.length % 2 !== 0 ? s[mid] : (s[mid - 1] + s[mid]) / 2.0;
               }
 
-              function drawFft(playing) {
+              function drawBins(bins) {
                 const c = document.getElementById('fftCanvas');
                 if (!c) return;
                 const ctx = c.getContext('2d');
@@ -440,43 +468,19 @@ jobs:
                 const n = 24, gap = 2;
                 const bw = (w - gap * (n - 1)) / n;
                 for (let i = 0; i < n; i++) {
-                  const val = playing ? bins[i] : 0.02;
-                  const bh = Math.max(3, val * (h - 8));
-                  ctx.fillStyle = i < 6 ? '#60A5FA' : '#FFD400';
+                  const v = (bins && bins[i]) ? bins[i] : 0.01;
+                  const bh = Math.max(2, v * (h - 6));
+                  ctx.fillStyle = i < 7 ? '#60A5FA' : '#FFD400';
                   ctx.fillRect(i * (bw + gap), h - bh, bw, bh);
                 }
               }
 
-              function computeAcousticModel(volPct, lowE, midE, playing) {
-                if (!playing || volPct <= 0) {
-                  return { top: 0, sub: 0, bot: 0, total: 0 };
-                }
-                const vNorm = volPct / 100.0;
-                const prof = document.getElementById('profileSel').value;
-                const paIdle = prof === 'stereo_only' ? 30 : 45;
-                const bassFactor = 0.18 + 1.35 * lowE;
-                const vocalFactor = 0.18 + 1.25 * midE;
-                const ampCurve = Math.pow(vNorm, 2.45);
-
-                const topRaw = (paIdle * 0.3) + 255 * ampCurve * vocalFactor;
-                const botRaw = (paIdle * 0.3) + 275 * ampCurve * vocalFactor;
-                const subMult = prof === 'stereo_only' ? 0 : (prof === 'bose_bal' ? 0.85 : 1.18);
-                const subRaw = prof === 'stereo_only' ? 0 : ((paIdle * 0.4) + 650 * Math.pow(vNorm, 2.55) * bassFactor * subMult);
-
-                const top = Math.round(topRaw * calFactor);
-                const bot = Math.round(botRaw * calFactor);
-                const sub = Math.round(subRaw * calFactor);
-                return { top, sub, bot, total: top + sub + bot };
-              }
-
-              document.getElementById('btnAutoMeasure').addEventListener('click', () => {
-                if (autoTesting) return;
-                autoTesting = true;
-                const wrap = document.getElementById('autoProgressWrap');
-                const bar = document.getElementById('autoProgressBar');
+              // Button 1: Automated Silent 0% vs Current Volume Test (Isolates Pure Speaker PA Power)
+              document.getElementById('btnAutoSpeaker').addEventListener('click', () => {
+                if (autoRunning) return;
+                autoRunning = true;
                 const statusEl = document.getElementById('autoStatusText');
-                const btn = document.getElementById('btnAutoMeasure');
-                wrap.style.display = 'block';
+                const btn = document.getElementById('btnAutoSpeaker');
                 statusEl.style.display = 'block';
                 btn.disabled = true;
                 btn.style.opacity = '0.5';
@@ -485,177 +489,159 @@ jobs:
                 let maxStep = 15;
                 if (window.AndroidBridge) {
                   try {
-                    savedStep = window.AndroidBridge.getMusicVolumeStep();
-                    maxStep = window.AndroidBridge.getMusicMaxStep();
-                    if (savedStep <= 1) savedStep = Math.round(maxStep * 0.75);
+                    const t = JSON.parse(window.AndroidBridge.getRealTelemetryJson());
+                    savedStep = t.step > 0 ? t.step : 11;
+                    maxStep = t.maxStep || 15;
                   } catch (e) {}
                 }
 
-                const muteSamples = [];
-                const playSamples = [];
-                const startMs = Date.now();
+                const muteArr = [];
+                const playArr = [];
+                const t0 = Date.now();
 
-                const timer = setInterval(() => {
-                  const elapsed = (Date.now() - startMs) / 1000.0;
-                  const pct = Math.min(100, Math.round((elapsed / 8.5) * 100));
-                  bar.style.width = pct + '%';
-
-                  let cur = 320;
+                const iv = setInterval(() => {
+                  const sec = (Date.now() - t0) / 1000.0;
+                  let cur = 0, volt = 3850;
                   if (window.AndroidBridge) {
-                    try { cur = window.AndroidBridge.getBatteryCurrentMa(); } catch (e) {}
+                    try {
+                      const t = JSON.parse(window.AndroidBridge.getRealTelemetryJson());
+                      cur = t.curMa;
+                      volt = t.voltMv;
+                    } catch (e) {}
                   }
 
-                  if (elapsed < 2.0) {
-                    statusEl.textContent = '1/3 等待手指觸控 CPU 降頻穩定中... (' + (2.0 - elapsed).toFixed(1) + 's)';
-                  } else if (elapsed < 5.2) {
-                    statusEl.textContent = '2/3 背景無UI靜音 (0%) 採樣基準電流中...';
+                  if (sec < 2.5) {
+                    statusEl.textContent = '⏳ 階段 1/3：請勿觸碰螢幕，等待觸控 CPU 降頻穩定 (' + (2.5 - sec).toFixed(1) + 's)...';
+                  } else if (sec < 7.5) {
+                    statusEl.textContent = '🔇 階段 2/3：無UI背景靜音 (0%，Poweramp EQ 仍運算中) 採集 I_eq...';
                     if (window.AndroidBridge) {
                       try { window.AndroidBridge.setMusicVolumeSilent(0); } catch (e) {}
                     }
-                    if (elapsed > 2.6 && cur > 50) muteSamples.push(cur);
-                  } else if (elapsed < 8.5) {
-                    statusEl.textContent = '3/3 背景無UI恢復外放音量採樣負載電流中...';
+                    if (sec > 3.5 && cur > 10) muteArr.push(cur);
+                  } else if (sec < 12.5) {
+                    statusEl.textContent = '🔊 階段 3/3：無UI恢復外放音量，採集外放總電流 I_spk...';
                     if (window.AndroidBridge) {
                       try { window.AndroidBridge.setMusicVolumeSilent(savedStep); } catch (e) {}
                     }
-                    if (elapsed > 5.8 && cur > 50) playSamples.push(cur);
+                    if (sec > 8.5 && cur > 10) playArr.push(cur);
                   } else {
-                    clearInterval(timer);
-                    autoTesting = false;
+                    clearInterval(iv);
+                    autoRunning = false;
                     btn.disabled = false;
                     btn.style.opacity = '1';
-                    wrap.style.display = 'none';
 
-                    const mBase = muteSamples.length ? trimmedMean(muteSamples) : 320;
-                    const mPlay = playSamples.length ? trimmedMean(playSamples) : (mBase + 165);
-                    baselineMa = mBase;
-                    document.getElementById('baseMa').textContent = mBase.toFixed(1) + ' mA (已無UI鎖定)';
+                    eqMuteMa = median(muteArr);
+                    activePlayMa = median(playArr);
+                    document.getElementById('eqMuteMaTxt').textContent = eqMuteMa.toFixed(1) + ' mA';
 
-                    let volt = 3850;
+                    const deltaSpkMa = activePlayMa - eqMuteMa;
+                    const spkMw = Math.round(deltaSpkMa * (volt / 1000.0));
+                    document.getElementById('spkPowerTxt').textContent =
+                      spkMw + ' mW (ΔI=' + (deltaSpkMa >= 0 ? '+' : '') + deltaSpkMa.toFixed(1) + 'mA)';
+
+                    if (idleMa !== null) {
+                      const deltaEqMa = eqMuteMa - idleMa;
+                      const eqMw = Math.round(deltaEqMa * (volt / 1000.0));
+                      document.getElementById('eqPowerTxt').textContent =
+                        eqMw + ' mW (ΔI=' + (deltaEqMa >= 0 ? '+' : '') + deltaEqMa.toFixed(1) + 'mA)';
+                    }
+
+                    statusEl.textContent =
+                      '✅ 實測完成！0%靜音中位數=' + eqMuteMa.toFixed(1) + 'mA，外放中位數=' + activePlayMa.toFixed(1) + 'mA，純喇叭差值=' + spkMw + 'mW';
+                  }
+                }, 250);
+              });
+
+              // Button 2: Record Idle Current when Music is Paused (after 2.5s touch cooldown)
+              document.getElementById('btnRecordIdle').addEventListener('click', () => {
+                if (autoRunning) return;
+                const statusEl = document.getElementById('autoStatusText');
+                statusEl.style.display = 'block';
+                const samples = [];
+                const t0 = Date.now();
+                const iv = setInterval(() => {
+                  const sec = (Date.now() - t0) / 1000.0;
+                  if (sec < 2.5) {
+                    statusEl.textContent = '⏳ 手請離開螢幕，等待觸控降頻後紀錄音樂暫停電流 (' + (2.5 - sec).toFixed(1) + 's)...';
+                  } else if (sec < 6.0) {
+                    statusEl.textContent = '📏 正在採集音樂暫停基準電流 I_idle...';
                     if (window.AndroidBridge) {
-                      try { volt = window.AndroidBridge.getBatteryVoltageMv(); } catch (e) {}
+                      try {
+                        const t = JSON.parse(window.AndroidBridge.getRealTelemetryJson());
+                        if (t.curMa > 10) samples.push(t.curMa);
+                      } catch (e) {}
                     }
-                    let rawDeltaMa = Math.max(12, mPlay - mBase);
-                    if (rawDeltaMa > 420) rawDeltaMa = 185;
-                    lastFilteredDeltaMa = rawDeltaMa;
-                    const measuredMw = Math.round(rawDeltaMa * (volt / 1000.0));
-                    document.getElementById('diffMw').textContent = measuredMw + ' mW (淨增 ' + rawDeltaMa.toFixed(0) + ' mA)';
-
-                    const volPct = Math.round((savedStep * 100.0) / maxStep);
-                    const uncal = computeAcousticModel(volPct, 0.45, 0.45, true);
-                    if (uncal.total > 50) {
-                      calFactor = Math.max(0.5, Math.min(1.8, measuredMw / uncal.total));
-                      document.getElementById('calFactorLabel').textContent = calFactor.toFixed(2) + 'x (已硬體校準)';
-                    }
-                    statusEl.textContent = '✅ 自動差值實測完成！純喇叭功耗約 ' + measuredMw + ' mW，已同步校準上方即時表！';
-                  }
-                }, 150);
-              });
-
-              document.getElementById('btnManualLock').addEventListener('click', () => {
-                if (steadyHistory.length > 0) {
-                  baselineMa = trimmedMean(steadyHistory);
-                  document.getElementById('baseMa').textContent = baselineMa.toFixed(1) + ' mA (手動鎖定)';
-                }
-              });
-
-              setInterval(() => {
-                let volPct = 73;
-                let step = 11, maxStep = 15;
-                let curMa = 340, voltMv = 3850;
-                let playing = true;
-                let visOk = false;
-                let lowE = 0.4, midE = 0.35;
-
-                if (window.AndroidBridge) {
-                  try {
-                    step = window.AndroidBridge.getMusicVolumeStep();
-                    maxStep = window.AndroidBridge.getMusicMaxStep();
-                    volPct = window.AndroidBridge.getMusicVolumePct();
-                    curMa = window.AndroidBridge.getBatteryCurrentMa();
-                    voltMv = window.AndroidBridge.getBatteryVoltageMv();
-
-                    const specRaw = window.AndroidBridge.getAudioSpectrumJson();
-                    const spec = JSON.parse(specRaw);
-                    playing = !!spec.playing;
-                    visOk = !!spec.vis;
-                    if (playing && visOk && spec.low >= 0) {
-                      lowE = spec.low;
-                      midE = Math.max(spec.mid, spec.rms * 0.9);
-                      if (Array.isArray(spec.bins) && spec.bins.length === 24) {
-                        bins = spec.bins;
-                      }
-                    } else if (playing) {
-                      const t = Date.now() / 1000.0;
-                      const beat = Math.pow((Math.sin(t * 6.8) + 1) / 2, 2.4);
-                      lowE = 0.28 + 0.52 * beat + Math.random() * 0.08;
-                      midE = 0.25 + 0.38 * Math.abs(Math.sin(t * 4.1)) + Math.random() * 0.08;
-                      for (let i = 0; i < 24; i++) {
-                        bins[i] = i < 6 ? lowE * (1 - i * 0.05) : midE * (0.9 - i * 0.02);
-                      }
-                    } else {
-                      lowE = 0; midE = 0;
-                      bins.fill(0.02);
-                    }
-                  } catch (e) {}
-                }
-
-                document.getElementById('volLabel').textContent = volPct + '% (' + step + '/' + maxStep + '格)';
-                document.getElementById('curMa').textContent = curMa.toFixed(0);
-                document.getElementById('voltMv').textContent = voltMv;
-
-                const pBadge = document.getElementById('playStatusBadge');
-                if (!playing || volPct === 0) {
-                  pBadge.textContent = volPct === 0 ? '系統靜音 (0 mW)' : '音樂已暫停 (0 mW)';
-                  pBadge.className = 'badge-warn';
-                } else {
-                  pBadge.textContent = visOk ? '🎵 全域頻譜即時捕捉中' : '🎵 偵測到外放音訊輸出中';
-                  pBadge.className = 'badge-green';
-                }
-
-                drawFft(playing && volPct > 0);
-                const pwr = computeAcousticModel(volPct, lowE, midE, playing);
-                document.getElementById('totalMw').textContent = pwr.total;
-                document.getElementById('topMw').textContent = pwr.top + ' mW';
-                document.getElementById('subMw').textContent = pwr.sub + ' mW';
-                document.getElementById('botMw').textContent = pwr.bot + ' mW';
-
-                if (pwr.total > peakMw) peakMw = pwr.total;
-                if (playing && volPct > 0) {
-                  sumMw += pwr.total;
-                  cntMw++;
-                }
-                document.getElementById('peakMw').textContent = peakMw + ' mW';
-                document.getElementById('avgMw').textContent = (cntMw > 0 ? Math.round(sumMw / cntMw) : 0) + ' mW';
-
-                if (curMa > 50) {
-                  steadyHistory.push(curMa);
-                  if (steadyHistory.length > 16) steadyHistory.shift();
-                }
-                const steadyBase = trimmedMean(steadyHistory);
-                const fBadge = document.getElementById('pmicFilterBadge');
-
-                if (baselineMa !== null && !autoTesting) {
-                  const rawDelta = Math.max(0, curMa - baselineMa);
-                  const maxPossibleSpeakerMa = (pwr.total / (voltMv / 1000.0)) * 1.45 + 45;
-                  const inTouchCooldown = Date.now() < touchCooldownUntil;
-
-                  if (inTouchCooldown || rawDelta > maxPossibleSpeakerMa) {
-                    const cpuSpike = Math.max(0, Math.round(rawDelta - lastFilteredDeltaMa));
-                    document.getElementById('cpuSpikeMa').textContent = '+' + cpuSpike + ' mA (已濾除)';
-                    fBadge.textContent = inTouchCooldown ? '觸控降頻鎖定中' : '已攔截 CPU 突波';
                   } else {
-                    lastFilteredDeltaMa = lastFilteredDeltaMa * 0.7 + rawDelta * 0.3;
-                    document.getElementById('cpuSpikeMa').textContent = '0 mA (穩態)';
-                    fBadge.textContent = 'PMIC 穩態追蹤中';
+                    clearInterval(iv);
+                    idleMa = median(samples);
+                    document.getElementById('idleMaTxt').textContent = idleMa.toFixed(1) + ' mA';
+                    if (eqMuteMa !== null && window.AndroidBridge) {
+                      const volt = window.AndroidBridge.getBatteryVoltageMv();
+                      const deltaEqMa = eqMuteMa - idleMa;
+                      const eqMw = Math.round(deltaEqMa * (volt / 1000.0));
+                      document.getElementById('eqPowerTxt').textContent =
+                        eqMw + ' mW (ΔI=' + (deltaEqMa >= 0 ? '+' : '') + deltaEqMa.toFixed(1) + 'mA)';
+                    }
+                    statusEl.textContent = '✅ 已紀錄音樂暫停基準 I_idle = ' + idleMa.toFixed(1) + ' mA';
                   }
-                  const cleanMw = (!playing || volPct === 0) ? 0 : Math.round(lastFilteredDeltaMa * (voltMv / 1000.0));
-                  document.getElementById('diffMw').textContent = cleanMw + ' mW';
-                } else {
-                  const spike = Math.max(0, Math.round(curMa - steadyBase));
-                  document.getElementById('cpuSpikeMa').textContent = spike > 120 ? ('+' + spike + ' mA (CPU波動)') : '穩態';
-                }
-              }, 160);
+                }, 250);
+              });
+
+              // Live 200ms Real Sensor Poll (Zero Fake Math.sin!)
+              setInterval(() => {
+                if (!window.AndroidBridge) return;
+                try {
+                  const t = JSON.parse(window.AndroidBridge.getRealTelemetryJson());
+                  document.getElementById('chgWarnBanner').style.display = t.chg ? 'block' : 'none';
+                  document.getElementById('micSrcBadge').textContent = t.mic ? t.src : '無麥克風權限';
+                  document.getElementById('dbBadge').textContent = t.db.toFixed(1) + ' dBFS';
+
+                  const volPct = Math.round((t.step * 100.0) / Math.max(1, t.maxStep));
+                  document.getElementById('volLabel').textContent = volPct + '% (' + t.step + '/' + t.maxStep + ')';
+                  document.getElementById('lowRmsTxt').textContent = t.lowRms.toFixed(4);
+                  document.getElementById('midRmsTxt').textContent = t.midRms.toFixed(4);
+
+                  drawBins(t.bins);
+
+                  // Real Acoustic Energy -> Power calculation (NO fake sine wave!)
+                  // Only outputs wattage when music is active AND volume > 0 AND real acoustic signal > noise floor
+                  if (!t.playing || t.step === 0 || (t.lowRms < 0.0008 && t.midRms < 0.0008)) {
+                    document.getElementById('totalMw').textContent = '0';
+                    document.getElementById('topMw').textContent = '0 mW';
+                    document.getElementById('subMw').textContent = '0 mW';
+                    document.getElementById('botMw').textContent = '0 mW';
+                  } else {
+                    const vNorm = t.step / Math.max(1.0, t.maxStep);
+                    const paIdle = 42.0;
+                    // Scale directly with measured 48kHz acoustic RMS (captures Poweramp EQ preamp & bass boost!)
+                    const lowScale = Math.min(2.2, Math.pow(t.lowRms * 18.0, 0.85));
+                    const midScale = Math.min(2.2, Math.pow(t.midRms * 22.0, 0.85));
+                    const gainCurve = Math.pow(vNorm, 2.2);
+
+                    const topMw = Math.round(((paIdle * 0.3) + 280.0 * gainCurve * (0.2 + midScale)) * calFactor);
+                    const botMw = Math.round(((paIdle * 0.3) + 300.0 * gainCurve * (0.2 + midScale)) * calFactor);
+                    const subMw = Math.round(((paIdle * 0.4) + 680.0 * gainCurve * (0.2 + lowScale)) * calFactor);
+                    const totMw = topMw + botMw + subMw;
+
+                    document.getElementById('totalMw').textContent = totMw;
+                    document.getElementById('topMw').textContent = topMw + ' mW';
+                    document.getElementById('subMw').textContent = subMw + ' mW';
+                    document.getElementById('botMw').textContent = botMw + ' mW';
+                  }
+
+                  if (t.curMa > 0) {
+                    const lastVal = rawHistory.length ? rawHistory[rawHistory.length - 1] : -1;
+                    if (t.curMa !== lastVal) {
+                      rawHistory.push(Number(t.curMa.toFixed(1)));
+                      if (rawHistory.length > 8) rawHistory.shift();
+                    }
+                  }
+                  const medMa = median(rawHistory);
+                  document.getElementById('rawDebugBox').innerHTML =
+                    'PMIC Raw: <strong>' + t.rawUa + '</strong> (' + t.curMa.toFixed(1) + ' mA) | 電壓: ' + t.voltMv + ' mV | 近期中位數: <strong style="color:#FFD400;">' + medMa.toFixed(1) + ' mA</strong><br>' +
+                    '最近PMIC跳變紀錄(mA): [' + rawHistory.join(', ') + ']';
+                } catch (e) {}
+              }, 200);
             </script>
           </body>
           </html>'''.strip())
@@ -689,7 +675,7 @@ jobs:
               "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
               "-dname", "CN=Android Debug,O=Android,C=US"
           ])
-          out_apk = "dist/PocoF8Ultra-SpeakerPower-v2.apk"
+          out_apk = "dist/PocoF8Ultra-SpeakerPower-v3.apk"
           subprocess.check_call([
               apksigner, "sign",
               "--ks", "debug.keystore",
@@ -699,11 +685,11 @@ jobs:
               "aligned.apk"
           ])
           subprocess.check_call([apksigner, "verify", "-v", out_apk])
-          print("APK v2.0 successfully built and verified:", out_apk)
+          print("APK v3.0 successfully built and verified:", out_apk)
           PY
 
       - name: Upload Compiled APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PocoF8Ultra-SpeakerPower-APK-v2
+          name: PocoF8Ultra-SpeakerPower-APK-v3
           path: dist/*.apk
