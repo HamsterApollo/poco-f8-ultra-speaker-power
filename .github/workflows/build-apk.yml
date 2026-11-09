@@ -132,12 +132,15 @@ jobs:
                     if (spkMw > 38 && dynBase > 15) { calFactor = Math.max(0.25, Math.min(2.20, (spkMw - 38.0) / dynBase)); document.getElementById('calLabel').textContent = calFactor.toFixed(2) + 'x'; }
                     if (idleMa !== null) {'''
           code = code.replace("if (idleMa !== null) {", cal_patch)
-          code = code.replace("v3.0", "v5.0").replace("v3", "v5")
+          ios_css = ':root{--glass-opacity:0.68}body{background:radial-gradient(circle at 18% 15%,rgba(255,212,0,0.14),transparent 42%),radial-gradient(circle at 82% 20%,rgba(56,189,248,0.15),transparent 45%),#07090E !important;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif !important;font-variant-numeric:tabular-nums !important}.card{background:rgba(19,25,38,var(--glass-opacity)) !important;backdrop-filter:blur(20px) saturate(160%) !important;-webkit-backdrop-filter:blur(20px) saturate(160%) !important;border-top:1px solid rgba(255,255,255,0.28) !important;border-left:1px solid rgba(255,255,255,0.22) !important;border-right:1px solid rgba(255,255,255,0.07) !important;border-bottom:1px solid rgba(255,255,255,0.06) !important;box-shadow:0 18px 40px -10px rgba(0,0,0,0.6),inset 0 1px 0 rgba(255,255,255,0.22) !important;border-radius:22px !important}.unit-box,.stat-item{background:rgba(10,14,24,calc(var(--glass-opacity)*0.85)) !important;border-top:1px solid rgba(255,255,255,0.16) !important;border-radius:14px !important}button,select,input{transition:transform 0.25s cubic-bezier(0.22,1,0.36,1),background 0.2s ease !important;font-variant-numeric:tabular-nums !important}button:active{transform:scale(0.97) !important}</style>'
+          code = code.replace('</style>', ios_css)
+          code = code.replace('function median(arr) {', 'function median(arr) { if(!arr.length)return 0; const s=arr.slice().sort((a,b)=>a-b),q1=s[Math.floor(s.length*0.25)],q3=s[Math.floor(s.length*0.75)],iqr=Math.max(5,q3-q1),f=s.filter(x=>x>=q1-1.5*iqr&&x<=q3+1.5*iqr); return f.reduce((a,b)=>a+b,0)/Math.max(1,f.length); } function _oldMed(arr) {')
+          code = code.replace("v3.0", "v6.0 Liquid Glass").replace("v3", "v6")
           exec(code, {"__name__": "__main__"})
           PY
 
       - name: Upload Compiled APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PocoF8Ultra-SpeakerPower-APK-v5
+          name: PocoF8Ultra-SpeakerPower-APK-v6
           path: dist/*.apk
