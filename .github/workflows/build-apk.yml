@@ -141,7 +141,7 @@ jobs:
                               code = code.replace('drawBins(t.bins);', dsp_js)
                               code = code.replace("v3.0", "v7.0 Liquid Glass DSP").replace("v3", "v7")
                             exec(code, {"__name__": "__main__"})
-                              PY
+                        PY
                           - name: Upload Compiled APK Artifact
                                   uses: actions/upload-artifact@v4
                                           with:
