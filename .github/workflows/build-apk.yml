@@ -22,7 +22,7 @@ jobs:
 
       - name: Compile and Sign Android APK v5.0
         run: |
-          sed 's/^[[:space:]]*//' << 'PY' | python3
+          sed 's/^[[:space:]]*//' << '          PY' | python3
                     import subprocess
                     PY = 0
                     NL = chr(10)
