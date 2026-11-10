@@ -11,6 +11,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -18,11 +20,38 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Compile and Sign Android APK v7.0 Liquid Glass DSP
-                          run: echo H4sIAJV18moC/8VSTW/bMAy951cIOkmxrTh10LRpPGAYdi123dIgkB0l1ixLgiTno8P+e2k3a9xDsd2mgymSeuTjM2VjjQvI+NiJ2LeFdaYU3sfPShZxwb24nY2uYVZypcgK72XAMd6JUFZgk6TVvoKMOeI1HTlx8PkQU4my3pg22Da8YeFRoqQPPRygAGRbUZqtIJR5q2QgdLQzDjkkNepKLkYouDN8UfhrdV8BldhFeMEgULXF5GhcvQOCflK0Um0Tbmt2boZtcRt2yR2A5V4bJzCFTk3uBPOCu7IiDotHF3arz8kPnjynyX00WUc4Dt07uUNNxwz5vBOuL9lYB/zIq4asuJ1d+jRs70xrSUojnMPB9Dp5V0KcREk8c8IqXgKto5MBTFRWjmQzOs7iS8gNYjT+hTcbzRux2eAFXBsuNVx/9yWNZxtxAklTcMWpFDagr72RRi8s935U59ieQ2V0hhK0XKJL7Xsg+e37m/P//wgorYQm4XVHlNTCE0o/zdIUcb1FdcctLAoneP3RqDrvppmCFjbX7KeRmqjVNF2s++LMB+6CPwJJgtHbwRQJ5QVSqJNA9W0ue1pHOp7S1XR98XU0wIF4XTJdvycMre31Fx+E80DvCwydP+HsCcPM72NziNErIGMpS+HRvLeDxCFjoGMHn/eXQYo8ojFK2fSGPkD+4qXp9I4+dIOTAi3RnKKG79E4Rxm7eRii/20LR/3y2o+X8c95AQzTuCd3BAAA | base64 -d | gunzip | python3 # # #
-# 3IG# # Jhc2# U2NCxyZSx6bGliCnQ9b3BlbigiLmdpdGh1Yi93b3JrZmxvd3MvYnVpbGQtYXBrLnltbCIpLnJlYWQoKQpiPXJlLnNlYXJjaCgiZU5ydGZbQS1aYS16MC05Ky89XSsiLHQpLmdyb3VwKDApCnM9emxpYi5kZWNvbXByZXNzKGJhc2U2NC5iNjRkZWNvZGUoYikpLmRlY29kZSgidXRmLTgiKQpleGVjKHMucmVwbGFjZSgid3JpdGUoIitjaHIoMzQpKjMsIndyaXRlKHIiK2NocigzNCkqMykpCgoK | base64 -d | python3
-                       - name: Upload Compiled APK Artifact
+      - name: Compile and Sign Android APK v4.0
+        run: |
+          python3 - << 'PY'
+          import subprocess
+          raw = ""
+          for rev in ["HEAD~1", "HEAD~2", "HEAD~3"]:
+              try:
+                  txt = subprocess.check_output(["git", "show", f"{rev}:.github/workflows/build-apk.yml"]).decode("utf-8")
+                  if "N * 0.12" in txt:
+                      raw = txt
+                      break
+              except Exception:
+                  pass
+          assert raw, "Base v3 commit not found"
+          s = raw.split("python3 - << 'PY'\n", 1)[1].split("\n          PY", 1)[0]
+          code = "\n".join(l[10:] if l.startswith("          ") else l for l in s.splitlines())
+          code = code.replace(
+              "double mag = Math.sqrt(q1 * q1 + q2 * q2 - q1 * q2 * coeff) / (N * 0.12);\n                                          double norm = Math.min(1.0, Math.pow(Math.max(0.0, mag), 0.55));",
+              "double mag = Math.sqrt(q1 * q1 + q2 * q2 - q1 * q2 * coeff) / (N * 0.005);\n                                          if (b < 7) mag *= 2.8;\n                                          double norm = Math.max(0.05, Math.min(1.0, (20.0 * Math.log10(Math.max(1e-5, mag)) + 52.0) / 48.0));"
+          )
+          code = code.replace("Math.pow(vNorm, 2.2)", "1.0")
+          code = code.replace("0.2 + midScale", "midScale").replace("0.2 + lowScale", "lowScale * 2.6")
+          code = code.replace(
+              "if (idleMa !== null) {",
+              "const avgNow = parseFloat(document.getElementById('totalMw').textContent) || 180;\n                    if (spkMw > 20 && avgNow > 20) { calFactor = Math.max(0.15, Math.min(3.5, spkMw / (avgNow / calFactor))); document.getElementById('calLabel').textContent = calFactor.toFixed(2) + 'x'; }\n                    if (idleMa !== null) {"
+          )
+          code = code.replace("v3.0", "v4.0").replace("v3", "v4")
+          exec(code, {"__name__": "__main__"})
+          PY
+
+      - name: Upload Compiled APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PocoF8Ultra-SpeakerPower-APK-v7
+          name: PocoF8Ultra-SpeakerPower-APK-v4
           path: dist/*.apk
