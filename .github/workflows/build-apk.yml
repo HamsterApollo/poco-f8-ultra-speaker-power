@@ -22,7 +22,7 @@ jobs:
 
       - name: Compile and Sign Android APK v4.0
         run: |
-          python3 - << 'PY'
+          git fetch --unshallow && python3 - << 'PY'
           import subprocess
           raw = ""
           for rev in ["HEAD~1", "HEAD~2", "HEAD~3"]:
@@ -53,5 +53,5 @@ jobs:
       - name: Upload Compiled APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PocoF8Ultra-SpeakerPower-APK-v4
+          name: PocoF8Ultra-SpeakerPower-APK-v7
           path: dist/*.apk
