@@ -30,7 +30,7 @@ jobs:
           for rev in revs:
               try:
                   txt = subprocess.check_output(["git", "show", f"{rev}:.github/workflows/build-apk.yml"]).decode("utf-8")
-                  if "N * 0.12" in txt and "package com.poco" in txt:
+                  if "N * 0.12" in txt and len(txt) > 20000:
                       raw = txt
                       break
               except Exception:
