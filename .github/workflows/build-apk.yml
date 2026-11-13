@@ -20,33 +20,122 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Compile and Sign Android APK v4.0
+      - name: Compile and Sign Android APK v5.0
         run: |
           python3 - << 'PY'
           import subprocess
+          NL = chr(10)
           raw = ""
-          for rev in [f"HEAD~{i}" for i in range(1, 50)]:
+          revs = subprocess.check_output(["git", "rev-list", "HEAD"]).decode("utf-8").splitlines()
+          for rev in revs:
               try:
                   txt = subprocess.check_output(["git", "show", f"{rev}:.github/workflows/build-apk.yml"]).decode("utf-8")
-                  if "package com.poco" in txt and "N * 0.12" in txt:
+                  if "N * 0.12" in txt and "package com.poco" in txt:
                       raw = txt
                       break
               except Exception:
                   pass
           assert raw, "Base v3 commit not found"
-          s = raw.split("python3 - << 'PY'\n", 1)[1].split("\n          PY", 1)[0]
-          code = "\n".join(l[10:] if l.startswith("          ") else l for l in s.splitlines())
-          code = code.replace(
-              "double mag = Math.sqrt(q1 * q1 + q2 * q2 - q1 * q2 * coeff) / (N * 0.12);\n                                          double norm = Math.min(1.0, Math.pow(Math.max(0.0, mag), 0.55));",
-              "double mag = Math.sqrt(q1 * q1 + q2 * q2 - q1 * q2 * coeff) / (N * 0.005);\n                                          if (b < 7) mag *= 2.8;\n                                          double norm = Math.max(0.05, Math.min(1.0, (20.0 * Math.log10(Math.max(1e-5, mag)) + 52.0) / 48.0));"
-          )
-          code = code.replace("Math.pow(vNorm, 2.2)", "1.0")
-          code = code.replace("0.2 + midScale", "midScale").replace("0.2 + lowScale", "lowScale * 2.6")
-          code = code.replace(
-              "if (idleMa !== null) {",
-              "const avgNow = parseFloat(document.getElementById('totalMw').textContent) || 180;\n                    if (spkMw > 20 && avgNow > 20) { calFactor = Math.max(0.15, Math.min(3.5, spkMw / (avgNow / calFactor))); document.getElementById('calLabel').textContent = calFactor.toFixed(2) + 'x'; }\n                    if (idleMa !== null) {"
-          )
-          code = code.replace("v3.0", "v7.0").replace("v3", "v7")
+          s = raw.split("python3 - << 'PY'" + NL, 1)[1].split(NL + "          PY", 1)[0]
+          code = NL.join(l[10:] if l.startswith("          ") else l for l in s.splitlines())
+          code = code.replace('ui_inject = "', "ui_inject = '''").replace('new_calc = "', "new_calc = '''").replace('</div>"\n', "</div>'''\n").replace('}"\n', "}'''\n")
+
+          a1, a2 = code.split("double mag = Math.sqrt(q1 * q1", 1)
+          a3 = a2.split('if (b > 0) sb.append(",");', 1)[1]
+          code = a1 + 'double mag = Math.sqrt(q1*q1 + q2*q2 - q1*q2*coeff)/(N*0.0018); if (b<7) mag*=3.2; double norm = Math.max(0.06, Math.min(1.0, (20.0*Math.log10(Math.max(1e-5,mag))+68.0)/58.0)); if (b > 0) sb.append(",");' + a3
+
+          ui_inject = '''<canvas id="fftCanvas" width="320" height="56"></canvas>
+              <div style="margin-top:8px;background:#0D1119;border:1px solid #1E293B;border-radius:10px;padding:8px;">
+                <div class="row-between" style="font-size:11px;color:#E2E8F0;margin-bottom:5px;">
+                  <span>⏱️ 積分鎖定週期 (越慢採樣越多越準):</span>
+                  <strong id="winStatusTxt" style="color:#FFD400;font-family:monospace;">3.0s 積分中</strong>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;">
+                  <button class="win-btn" data-sec="0.2" style="margin:0;padding:6px 2px;font-size:10px;background:#1E293B;color:#CBD5E1;">0.2s</button>
+                  <button class="win-btn" data-sec="1.0" style="margin:0;padding:6px 2px;font-size:10px;background:#1E293B;color:#CBD5E1;">1秒</button>
+                  <button class="win-btn" data-sec="3.0" style="margin:0;padding:6px 2px;font-size:10px;background:#FFD400;color:#000;">3秒</button>
+                  <button class="win-btn" data-sec="5.0" style="margin:0;padding:6px 2px;font-size:10px;background:#1E293B;color:#CBD5E1;">5秒</button>
+                  <button class="win-btn" data-sec="10.0" style="margin:0;padding:6px 2px;font-size:10px;background:#1E293B;color:#CBD5E1;">10秒</button>
+                  <button class="win-btn" data-sec="15.0" style="margin:0;padding:6px 2px;font-size:10px;background:#1E293B;color:#CBD5E1;">15秒</button>
+                </div>
+                <div style="width:100%;height:5px;background:#070A0E;border-radius:99px;overflow:hidden;margin-top:6px;">
+                  <div id="winProgBar" style="height:100%;width:0%;background:#34D399;transition:width 0.15s;"></div>
+                </div>
+                <div class="row-between" style="margin-top:6px;">
+                  <button id="btnSnapLog" style="margin:0;padding:6px 8px;font-size:11px;background:#3B82F6;color:#fff;width:68%;">📌 釘選當前鎖定值到下方紀錄表</button>
+                  <button id="btnResetCal" style="margin:0;padding:6px 6px;font-size:11px;background:#1E293B;color:#94A3B8;width:30%;">重置1.0x</button>
+                </div>
+                <div id="snapListBox" style="font-family:monospace;font-size:10px;color:#A7F3D0;margin-top:5px;line-height:1.4;"></div>
+              </div>'''
+          code = code.replace('<canvas id="fftCanvas" width="320" height="56"></canvas>', ui_inject)
+
+          new_calc = '''                  if (!window._wSec) {
+                    window._wSec = 3.0; window._wT0 = Date.now(); window._accL = 0; window._accM = 0; window._accN = 0; window._snaps = [];
+                    document.querySelectorAll('.win-btn').forEach(b => b.onclick = () => {
+                      window._wSec = parseFloat(b.getAttribute('data-sec'));
+                      window._wT0 = Date.now(); window._accL = 0; window._accM = 0; window._accN = 0;
+                      document.querySelectorAll('.win-btn').forEach(x => { x.style.background = '#1E293B'; x.style.color = '#CBD5E1'; });
+                      b.style.background = '#FFD400'; b.style.color = '#000';
+                    });
+                    document.getElementById('btnResetCal').onclick = () => { calFactor = 1.0; document.getElementById('calLabel').textContent = '1.00x'; };
+                    document.getElementById('btnSnapLog').onclick = () => {
+                      const vTxt = document.getElementById('volLabel').textContent;
+                      const tot = document.getElementById('totalMw').textContent;
+                      const sub = document.getElementById('subMw').textContent;
+                      window._snaps.unshift('📌 音量 ' + vTxt + ' → ' + tot + ' mW (重低音 ' + sub + ' | ' + window._wSec + 's積分)');
+                      if (window._snaps.length > 6) window._snaps.pop();
+                      document.getElementById('snapListBox').innerHTML = window._snaps.join('<br>');
+                    };
+                  }
+                  if (!t.playing || t.step === 0) {
+                    window._accL = 0; window._accM = 0; window._accN = 0; window._wT0 = Date.now();
+                    document.getElementById('totalMw').textContent = '0';
+                    document.getElementById('topMw').textContent = '0 mW';
+                    document.getElementById('subMw').textContent = '0 mW';
+                    document.getElementById('botMw').textContent = '0 mW';
+                    document.getElementById('winProgBar').style.width = '0%';
+                    document.getElementById('winStatusTxt').textContent = '音樂暫停 (0 mW)';
+                  } else {
+                    const lNet = Math.max(0, t.lowRms - 0.00035);
+                    const mNet = Math.max(0, t.midRms - 0.00045);
+                    window._accL += lNet * lNet;
+                    window._accM += mNet * mNet;
+                    window._accN += 1;
+                    const el = (Date.now() - window._wT0) / 1000.0;
+                    const pct = Math.min(100, Math.round((el / window._wSec) * 100));
+                    document.getElementById('winProgBar').style.width = pct + '%';
+                    const kSamples = Math.round(el * 48);
+                    document.getElementById('winStatusTxt').textContent = el.toFixed(1) + 's/' + window._wSec.toFixed(1) + 's (' + kSamples + 'k樣本積分)';
+                    if (el >= window._wSec && window._accN > 0) {
+                      const rmsL = Math.sqrt(window._accL / window._accN);
+                      const rmsM = Math.sqrt(window._accM / window._accN);
+                      window._accL = 0; window._accM = 0; window._accN = 0; window._wT0 = Date.now();
+                      const lowP = 480.0 * Math.pow(Math.min(1.8, rmsL * 95.0), 1.25);
+                      const midP = 185.0 * Math.pow(Math.min(1.8, rmsM * 45.0), 1.25);
+                      const topMw = Math.round(11.0 + midP * 0.95 * calFactor);
+                      const botMw = Math.round(12.0 + midP * 1.05 * calFactor);
+                      const subMw = Math.round(15.0 + lowP * calFactor);
+                      const totMw = (rmsL < 0.0001 && rmsM < 0.0001) ? 0 : (topMw + botMw + subMw);
+                      window._lastRawDyn = Math.max(10, lowP + midP * 2.0);
+                      document.getElementById('totalMw').textContent = totMw;
+                      document.getElementById('topMw').textContent = (totMw ? topMw : 0) + ' mW';
+                      document.getElementById('subMw').textContent = (totMw ? subMw : 0) + ' mW';
+                      document.getElementById('botMw').textContent = (totMw ? botMw : 0) + ' mW';
+                    }
+                  }'''
+
+          p1, p2 = code.split("if (!t.playing || t.step === 0 || (t.lowRms < 0.0008", 1)
+          p3 = p2.split("if (t.curMa > 0) {", 1)[1]
+          code = p1 + new_calc + NL + "                  if (t.curMa > 0) {" + p3
+
+          cal_patch = '''const dynBase = window._lastRawDyn || 220;
+                    if (spkMw > 38 && dynBase > 15) { calFactor = Math.max(0.25, Math.min(2.20, (spkMw - 38.0) / dynBase)); document.getElementById('calLabel').textContent = calFactor.toFixed(2) + 'x'; }
+                    if (idleMa !== null) {'''
+          code = code.replace("if (idleMa !== null) {", cal_patch)
+          ios_css = ':root{--glass-opacity:0.68}body{background:radial-gradient(circle at 18% 15%,rgba(255,212,0,0.14),transparent 42%),radial-gradient(circle at 82% 20%,rgba(56,189,248,0.15),transparent 45%),#07090E !important;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif !important;font-variant-numeric:tabular-nums !important}.card{background:rgba(19,25,38,var(--glass-opacity)) !important;backdrop-filter:blur(20px) saturate(160%) !important;-webkit-backdrop-filter:blur(20px) saturate(160%) !important;border-top:1px solid rgba(255,255,255,0.28) !important;border-left:1px solid rgba(255,255,255,0.22) !important;border-right:1px solid rgba(255,255,255,0.07) !important;border-bottom:1px solid rgba(255,255,255,0.06) !important;box-shadow:0 18px 40px -10px rgba(0,0,0,0.6),inset 0 1px 0 rgba(255,255,255,0.22) !important;border-radius:22px !important}.unit-box,.stat-item{background:rgba(10,14,24,calc(var(--glass-opacity)*0.85)) !important;border-top:1px solid rgba(255,255,255,0.16) !important;border-radius:14px !important}button,select,input{transition:transform 0.25s cubic-bezier(0.22,1,0.36,1),background 0.2s ease !important;font-variant-numeric:tabular-nums !important}button:active{transform:scale(0.97) !important}</style>'
+          code = code.replace('</style>', ios_css)
+          code = code.replace('function median(arr) {', 'function median(arr) { if(!arr.length)return 0; const s=arr.slice().sort((a,b)=>a-b),q1=s[Math.floor(s.length*0.25)],q3=s[Math.floor(s.length*0.75)],iqr=Math.max(5,q3-q1),f=s.filter(x=>x>=q1-1.5*iqr&&x<=q3+1.5*iqr); return f.reduce((a,b)=>a+b,0)/Math.max(1,f.length); } function _oldMed(arr) {')
+          code = code.replace("v3.0", "v7.0 Liquid Glass").replace("v3", "v7")
           exec(code, {"__name__": "__main__"})
           PY
 
